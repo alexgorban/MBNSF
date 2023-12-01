@@ -147,7 +147,7 @@ def sceneflow_deep_prior(
         
     flow_pred = best_flow.detach().cpu()
         
-    return flow_pred, info_dict
+    return flow_pred, labels, info_dict
 
 
 def fit_sequence_of_scene_flow_field(
@@ -167,6 +167,8 @@ def fit_sequence_of_scene_flow_field(
     cur_metrics = {}
     for label in metric_labels:
         cur_metrics[label] = np.zeros(n_lidar_sweeps-1)
+    flow_out = []
+    labels_out = []
     for i in range(n_lidar_sweeps-1):
         pc1 = torch.from_numpy(pc_list[i]).float().clone()
         pc2 = torch.from_numpy(pc_list[i + 1]).float().clone()
@@ -180,8 +182,9 @@ def fit_sequence_of_scene_flow_field(
         logger.info(f"{i}->{i + 1}")
 
         # ANCHOR: Run scene flow estimation
-        flow_pred, info_dict_forward = sceneflow_deep_prior(pc1, pc2, info_dict, options)
-
+        flow_pred, labels, info_dict_forward = sceneflow_deep_prior(pc1, pc2, info_dict, options)
+        flow_out.append(flow_pred)
+        labels_out.append(labels)
 
         # evaluate flow metrics
         EPE3D_1, acc3d_strict_1, acc3d_relax_1, outlier_1, angle_error_1 = scene_flow_metrics(flow_pred.unsqueeze(0),
@@ -204,7 +207,7 @@ def fit_sequence_of_scene_flow_field(
     logging.info(cur_metrics)
 
 
-    return cur_metrics
+    return flow_out, labels_out, cur_metrics
 
 
 if __name__ == "__main__":
@@ -256,27 +259,33 @@ if __name__ == "__main__":
     logging.info('---------------------------------------')
 
     # load point cloud sequeence
-    argoverse_tracking_val_log_ids = sorted(glob.glob(os.path.join(options.dataset_path, '*.npz')))
+    npz_files = sorted(glob.glob(os.path.join(options.dataset_path, '*.npz')))
+    pred_dir = f'{options.dataset_path}_{options.exp_name}_pred'
+    os.makedirs(pred_dir, exist_ok=True)
 
     metric_labels = ['epe', 'acc_strict', 'acc_relax', 'angle_error', 'outlier', 'time']
     seq_metrics = {}
     for label in metric_labels:
-        seq_metrics[label] = np.zeros(len(argoverse_tracking_val_log_ids))
+        seq_metrics[label] = np.zeros(len(npz_files))
 
-    for fi_id in range(len(argoverse_tracking_val_log_ids)):
-        logging.info(f"ID: {fi_id}/{len(argoverse_tracking_val_log_ids)}")
-        fi_name = argoverse_tracking_val_log_ids[fi_id]
+    for fi_id, fi_name in enumerate(npz_files):
+        logging.info(f"ID: {fi_id}/{len(npz_files)}")
         log_id = fi_name.split('/')[-1].split('.')[0]
     
         data = np.load(fi_name, allow_pickle=True)
 
         pc_list = [data['pcs'][i] for i in range(options.traj_len)]
-        flow_gt_list = [data['flos'][i] for i in range(options.traj_len-1)]
+        flow_gt_list = [data['flows'][i] for i in range(options.traj_len-1)]
 
         cur_exp_dir = os.path.join(exp_dir_path, log_id)
         os.makedirs(cur_exp_dir, exist_ok=True)
         
-        metrics = fit_sequence_of_scene_flow_field(cur_exp_dir, pc_list, options, flow_gt_list)
+        flow, labels, metrics = fit_sequence_of_scene_flow_field(cur_exp_dir, pc_list, options, flow_gt_list)
+        pred_path = f'{pred_dir}/{log_id}_flow.npz'
+        print(f'Store output into {pred_path}')
+        np.savez(pred_path,
+                 flows=np.asarray([t.numpy() for t in flow], dtype='object'),
+                 labels=np.asarray([t for t in labels], dtype='object'))
         seq_metrics['epe'][fi_id] = metrics['epe']
         seq_metrics['acc_strict'][fi_id] = metrics['acc_strict']
         seq_metrics['acc_relax'][fi_id] = metrics['acc_relax']
